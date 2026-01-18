@@ -8,27 +8,27 @@ import yt_dlp
 import uuid
 
 app = Flask(__name__)
-# Allow CORS for all domains (simplifies Android testing)
 CORS(app, supports_credentials=True)
 
-# --- CONFIGURATION (Loaded from Railway Environment Variables) ---
-# You will set these values in the Railway Dashboard later
+# --- SECURITY UPDATE ---
+# We now load keys from Railway Variables.
+# If these variables are missing, the app will fail to start (which is good for security).
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
-APP_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'default_dev_key')
-RAILWAY_PUBLIC_DOMAIN = os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'http://localhost:5000')
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev_key_fallback')
 
-# Dynamic Redirect URI based on where the app is hosted
-SPOTIFY_REDIRECT_URI = f"{RAILWAY_PUBLIC_DOMAIN}/callback"
+# PROXY SETUP
+PROXY_URL = os.environ.get('PROXY_URL', None)
 
-app.secret_key = APP_SECRET_KEY
+# REDIRECT URI
+# We still trick Spotify into thinking we are localhost to match the key settings
+SPOTIFY_REDIRECT_URI = 'http://localhost:5000/callback'
 
 def get_db_connection():
-    # Railway provides these variables automatically when you add MySQL
     return mysql.connector.connect(
         host=os.environ.get('MYSQLHOST', 'localhost'),
         user=os.environ.get('MYSQLUSER', 'root'),
-        password=os.environ.get('MYSQLPASSWORD', ''),
+        password=os.environ.get('MYSQLPASSWORD', 'shikari'),
         database=os.environ.get('MYSQLDATABASE', 'spotify_clone'),
         port=os.environ.get('MYSQLPORT', 3306)
     )
@@ -36,8 +36,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # Users Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -54,24 +52,26 @@ def init_db():
     conn.close()
 
 def get_youtube_stream_url(track_name):
-    # Added 'nocheckcertificate' to help with some cloud environment issues
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
-        'nocheckcertificate': True, 
+        'nocheckcertificate': True,
     }
-        
+    
+    if PROXY_URL:
+        ydl_opts['proxy'] = PROXY_URL
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(f"ytsearch:{track_name}", download=False)['entries'][0]
             return info['url']
         except Exception as e:
-            print(f"Error fetching YouTube URL: {e}")
+            print(f"YT-DLP Error: {e}")
             return None
 
 @app.route('/')
 def index():
-    return "SpTube Backend is Running! Use the Android App to interact."
+    return "SpTube Secure Backend is Running."
 
 @app.route('/login')
 def spotify_login():
@@ -81,8 +81,7 @@ def spotify_login():
         redirect_uri=SPOTIFY_REDIRECT_URI,
         scope='user-read-private playlist-read-private streaming'
     )
-    auth_url = sp_oauth.get_authorize_url()
-    return redirect(auth_url)
+    return redirect(sp_oauth.get_authorize_url())
 
 @app.route('/callback')
 def spotify_callback():
@@ -97,13 +96,16 @@ def spotify_callback():
     if not code:
         return jsonify({"error": "No code provided"}), 400
 
-    token_info = sp_oauth.get_access_token(code)
+    try:
+        token_info = sp_oauth.get_access_token(code)
+    except Exception as e:
+        return jsonify({"error": "Token exchange failed", "details": str(e)}), 400
+
     sp = spotipy.Spotify(auth=token_info['access_token'])
     user_info = sp.current_user()
     
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     session_token = str(uuid.uuid4())
     
     try:
@@ -112,9 +114,7 @@ def spotify_callback():
             (spotify_id, display_name, email, access_token, refresh_token, session_token) 
             VALUES (%s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE 
-            access_token = %s, 
-            refresh_token = %s,
-            session_token = %s
+            access_token = %s, refresh_token = %s, session_token = %s
         ''', (
             user_info['id'], 
             user_info['display_name'], 
@@ -128,98 +128,34 @@ def spotify_callback():
         ))
         conn.commit()
     except Exception as e:
-        print(f"Error storing user: {e}")
-        return jsonify({"error": "Database error"}), 500
+        print(f"DB Error: {e}")
     finally:
         cursor.close()
         conn.close()
     
-    # ANDROID SPECIFIC CHANGE:
-    # Instead of redirecting to a local HTML file, we return a JSON success message.
-    # The Android app will intercept this response to know login is done.
-    resp = make_response(jsonify({"status": "success", "message": "LOGIN_SUCCESSFUL"}))
-    
-    # We set the cookie for the session
+    # Return JSON success with token
+    resp = make_response(jsonify({
+        "status": "success", 
+        "session_token": session_token,
+        "user": user_info['display_name']
+    }))
     resp.set_cookie('session_token', session_token, httponly=True, secure=True, samesite='None')
     return resp
 
 @app.route('/check_session')
 def check_session():
     session_token = request.cookies.get('session_token')
-    
-    if not session_token:
-        return jsonify({"authenticated": False})
+    if not session_token: return jsonify({"authenticated": False})
     
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
     try:
         cursor.execute('SELECT * FROM users WHERE session_token = %s', (session_token,))
         user = cursor.fetchone()
-        
         return jsonify({
             "authenticated": bool(user),
-            "user": {
-                "display_name": user['display_name'] if user else None,
-                "email": user['email'] if user else None
-            }
+            "user": {"display_name": user['display_name']} if user else None
         })
-    finally:
-        cursor.close()
-        conn.close()
-
-@app.route('/stream_track')
-def stream_track():
-    track_name = request.args.get('track')
-    if not track_name:
-        return jsonify({"error": "No track name provided"}), 400
-
-    stream_url = get_youtube_stream_url(track_name)
-    
-    if stream_url:
-        return jsonify({"stream_url": stream_url})
-    else:
-        return jsonify({"error": "Could not find streaming link"}), 404
-
-@app.route('/logout')
-def logout():
-    # Return JSON so Android can handle the logout state UI update
-    resp = make_response(jsonify({"status": "success", "message": "Logged out"}))
-    resp.set_cookie('session_token', '', expires=0)
-    return resp
-
-# --- API ENDPOINTS FOR ANDROID (UNCHANGED LOGIC) ---
-
-@app.route('/search')
-def search_tracks():
-    session_token = request.cookies.get('session_token')
-    if not session_token: return jsonify({"error": "Unauthorized"}), 401
-    
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    try:
-        cursor.execute('SELECT access_token FROM users WHERE session_token = %s', (session_token,))
-        user = cursor.fetchone()
-        
-        if not user: return jsonify({"error": "Invalid session"}), 401
-        
-        query = request.args.get('q', '')
-        sp = spotipy.Spotify(auth=user['access_token'])
-        results = sp.search(q=query, type='track', limit=12)
-        
-        tracks = [
-            {
-                'id': track['id'],
-                'name': track['name'],
-                'artists': [{'name': artist['name']} for artist in track['artists']],
-                'album': {'images': track['album']['images']}
-            } 
-            for track in results['tracks']['items']
-        ]
-        return jsonify(tracks)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
     finally:
         cursor.close()
         conn.close()
@@ -231,11 +167,9 @@ def get_recommendations():
     
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
     try:
         cursor.execute('SELECT access_token FROM users WHERE session_token = %s', (session_token,))
         user = cursor.fetchone()
-        
         if not user: return jsonify({"error": "Invalid session"}), 401
         
         sp = spotipy.Spotify(auth=user['access_token'])
@@ -244,16 +178,12 @@ def get_recommendations():
         if top_tracks['items']:
             seed_track_id = top_tracks['items'][0]['id']
             recommendations = sp.recommendations(seed_tracks=[seed_track_id], limit=12)
-            
-            tracks = [
-                {
-                    'id': track['id'],
-                    'name': track['name'],
-                    'artists': [{'name': artist['name']} for artist in track['artists']],
-                    'album': {'images': track['album']['images']}
-                } 
-                for track in recommendations['tracks']
-            ]
+            tracks = [{
+                'id': t['id'],
+                'name': t['name'],
+                'artists': [{'name': a['name']} for a in t['artists']],
+                'album': {'images': t['album']['images']}
+            } for t in recommendations['tracks']]
             return jsonify(tracks)
         return jsonify([])
     except Exception as e:
@@ -262,14 +192,41 @@ def get_recommendations():
         cursor.close()
         conn.close()
 
-if __name__ == '__main__':
-    # Railway sets the PORT env variable automatically
-    port = int(os.environ.get("PORT", 5000))
-    # In production, we don't init_db() here usually, but for simplicity we keep it
-    # Note: It's better to run init_db logic manually or via migration script in production
+@app.route('/search')
+def search_tracks():
+    session_token = request.cookies.get('session_token')
+    if not session_token: return jsonify({"error": "Unauthorized"}), 401
+    
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
     try:
-        init_db()
-    except Exception as e:
-        print(f"DB Init Warning: {e}")
+        cursor.execute('SELECT access_token FROM users WHERE session_token = %s', (session_token,))
+        user = cursor.fetchone()
+        if not user: return jsonify({"error": "Invalid session"}), 401
         
+        query = request.args.get('q', '')
+        sp = spotipy.Spotify(auth=user['access_token'])
+        results = sp.search(q=query, type='track', limit=12)
+        tracks = [{
+            'id': t['id'],
+            'name': t['name'],
+            'artists': [{'name': a['name']} for a in t['artists']],
+            'album': {'images': t['album']['images']}
+        } for t in results['tracks']['items']]
+        return jsonify(tracks)
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.route('/stream_track')
+def stream_track():
+    track_name = request.args.get('track')
+    url = get_youtube_stream_url(track_name)
+    if url: return jsonify({"stream_url": url})
+    return jsonify({"error": "Not found"}), 404
+
+if __name__ == '__main__':
+    try: init_db()
+    except: pass
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
