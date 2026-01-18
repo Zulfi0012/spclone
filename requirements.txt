@@ -1,0 +1,7 @@
+Flask
+flask-cors
+spotipy
+mysql-connector-python
+requests
+yt-dlp
+gunicorn
