@@ -24,7 +24,16 @@ def get_spotify_client():
     )
     return spotipy.Spotify(auth_manager=auth_manager)
 
+# --- ADD THIS NEAR THE TOP OF app.py ---
+url_cache = {} # Memory to store links so we don't search twice
+
+# --- REPLACE THE OLD get_youtube_stream_url FUNCTION WITH THIS ---
 def get_youtube_stream_url(track_name):
+    # 1. CHECK CACHE FIRST (Instant Speed)
+    if track_name in url_cache:
+        print(f"Cache Hit: {track_name}")
+        return url_cache[track_name]
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
@@ -36,8 +45,13 @@ def get_youtube_stream_url(track_name):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(f"ytsearch:{track_name}", download=False)['entries'][0]
-            return info['url']
-        except Exception:
+            url = info['url']
+            
+            # 2. SAVE TO CACHE
+            url_cache[track_name] = url 
+            return url
+        except Exception as e:
+            print(f"Error: {e}")
             return None
 
 @app.route('/')
