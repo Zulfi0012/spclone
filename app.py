@@ -29,23 +29,24 @@ url_cache = {} # Memory to store links so we don't search twice
 
 # --- REPLACE THE OLD get_youtube_stream_url FUNCTION WITH THIS ---
 def get_youtube_stream_url(track_name):
-    # 1. CHECK CACHE FIRST (Instant Speed)
-    if track_name in url_cache:
-        print(f"Cache Hit: {track_name}")
-        return url_cache[track_name]
+    cookie_path = 'cookies/youtube.txt'
+
+    if not os.path.exists(cookie_path):
+        return None
 
     ydl_opts = {
         'format': 'bestaudio/best',
         'quiet': True,
-        'nocheckcertificate': True,
+        'cookiefile': cookie_path,
+        'nocheckcertificate': True
     }
-    if PROXY_URL:
-        ydl_opts['proxy'] = PROXY_URL
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(f"ytsearch:{track_name}", download=False)['entries'][0]
-            url = info['url']
+        results = ydl.extract_info(f"ytsearch:{track_name}", download=False)
+        if not results or 'entries' not in results or not results['entries']:
+            return None
+        return results['entries'][0]['url']
+
             
             # 2. SAVE TO CACHE
             url_cache[track_name] = url 
@@ -96,10 +97,22 @@ def search_tracks():
 
 @app.route('/stream_track')
 def stream_track():
+    if not os.path.exists('cookies/youtube.txt'):
+        return jsonify({
+            "error": "YouTube cookies not uploaded"
+        }), 400
+
     track_name = request.args.get('track')
-    url = get_youtube_stream_url(track_name)
-    if url: return jsonify({"stream_url": url})
-    return jsonify({"error": "Not found"}), 404
+    if not track_name:
+        return jsonify({"error": "Track name missing"}), 400
+
+    stream_url = get_youtube_stream_url(track_name)
+
+    if stream_url:
+        return jsonify({"stream_url": stream_url})
+    else:
+        return jsonify({"error": "Could not get stream URL"}), 404
+
 @app.route('/upload_youtube_cookie', methods=['POST'])
 def upload_youtube_cookie():
     if 'file' not in request.files:
