@@ -100,6 +100,25 @@ def stream_track():
     url = get_youtube_stream_url(track_name)
     if url: return jsonify({"stream_url": url})
     return jsonify({"error": "Not found"}), 404
+@app.route('/upload_youtube_cookie', methods=['POST'])
+def upload_youtube_cookie():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files['file']
+
+    if not file.filename.endswith('.txt'):
+        return jsonify({"error": "Only .txt cookie files allowed"}), 400
+
+    os.makedirs('cookies', exist_ok=True)
+    save_path = os.path.join('cookies', 'youtube.txt')
+
+    file.save(save_path)
+
+    return jsonify({
+        "status": "success",
+        "message": "YouTube cookies uploaded successfully"
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
